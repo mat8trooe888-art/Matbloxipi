@@ -35,8 +35,10 @@ async function initDB() {
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         `);
-        // Добавляем колонку published, если её нет
         await pool.query(`ALTER TABLE games ADD COLUMN IF NOT EXISTS published BOOLEAN DEFAULT FALSE`);
+        await pool.query(`ALTER TABLE games ADD COLUMN IF NOT EXISTS thumbnail TEXT`);
+        await pool.query(`ALTER TABLE games ADD COLUMN IF NOT EXISTS video_url TEXT`);
+        
         await pool.query(`
             CREATE TABLE IF NOT EXISTS chat_messages (
                 id SERIAL PRIMARY KEY,
@@ -58,76 +60,127 @@ async function initDB() {
 }
 initDB();
 
-app.get('/', (req, res) => res.send('BlockVerse API'));
+app.get('/', (req, res) => { res.send('BlockVerse API running'); });
 
 app.post('/api/register', async (req, res) => {
     const { username, password } = req.body;
+    if (!username || !password) return res.status(400).json({ error: 'Username and password required' });
     try {
+        const existing = await pool.query('SELECT * FROM users WHERE username = $1', [username]);
+        if (existing.rows.length) return res.status(400).json({ error: 'User already exists' });
         await pool.query('INSERT INTO users (username, password) VALUES ($1, $2)', [username, password]);
         res.json({ success: true });
-    } catch (err) { res.status(400).json({ error: 'User exists' }); }
+    } catch (err) { res.status(500).json({ error: 'Server error' }); }
 });
 
 app.post('/api/login', async (req, res) => {
     const { username, password } = req.body;
-    const r = await pool.query('SELECT * FROM users WHERE username=$1 AND password=$2', [username, password]);
-    if (r.rows.length) {
-        const u = r.rows[0];
-        res.json({ success: true, user: { username: u.username, coins: u.coins, inventory: u.inventory ? JSON.parse(u.inventory) : [], friends: u.friends ? JSON.parse(u.friends) : [] } });
-    } else res.status(401).json({ error: 'Invalid' });
+    try {
+        const result = await pool.query('SELECT * FROM users WHERE username = $1 AND password = $2', [username, password]);
+        if (result.rows.length) {
+            const user = result.rows[0];
+            res.json({
+                success: true,
+                user: {
+                    username: user.username,
+                    coins: user.coins,
+                    inventory: user.inventory ? JSON.parse(user.inventory) : [],
+                    friends: user.friends ? JSON.parse(user.friends) : []
+                }
+            });
+        } else {
+            res.status(401).json({ error: 'Invalid credentials' });
+        }
+    } catch (err) { res.status(500).json({ error: 'Server error' }); }
 });
 
 app.get('/api/games', async (req, res) => {
-    const publishedOnly = req.query.published === 'true';
-    const q = publishedOnly ? 'SELECT * FROM games WHERE published=true ORDER BY created_at DESC' : 'SELECT * FROM games ORDER BY created_at DESC';
-    const r = await pool.query(q);
-    res.json(r.rows);
+    try {
+        const publishedOnly = req.query.published === 'true';
+        let query = 'SELECT id, name, author, description, data, published, thumbnail, video_url FROM games';
+        if (publishedOnly) query += ' WHERE published = true';
+        query += ' ORDER BY created_at DESC';
+        const result = await pool.query(query);
+        res.json(result.rows);
+    } catch (err) { res.status(500).json({ error: 'Server error' }); }
 });
 
 app.post('/api/games', async (req, res) => {
     const { name, author, description, data, published } = req.body;
-    const r = await pool.query('INSERT INTO games (name, author, description, data, published) VALUES ($1,$2,$3,$4,$5) RETURNING id', [name, author, description||'', data, published||false]);
-    res.json({ id: r.rows[0].id });
+    if (!name || !author) return res.status(400).json({ error: 'Missing fields' });
+    const thumbnail = data?.thumbnail || null;
+    const videoUrl = data?.videoUrl || null;
+    try {
+        const result = await pool.query(
+            `INSERT INTO games (name, author, description, data, published, thumbnail, video_url) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
+            [name, author, description || '', data, published || false, thumbnail, videoUrl]
+        );
+        res.json({ id: result.rows[0].id });
+    } catch (err) { res.status(500).json({ error: 'Server error' }); }
 });
 
 app.put('/api/games/:id', async (req, res) => {
     const { id } = req.params;
     const { name, description, data, published } = req.body;
-    await pool.query('UPDATE games SET name=$1, description=$2, data=$3, published=$4 WHERE id=$5', [name, description||'', data, published||false, id]);
-    res.json({ success: true });
+    const thumbnail = data?.thumbnail || null;
+    const videoUrl = data?.videoUrl || null;
+    try {
+        await pool.query(
+            `UPDATE games SET name = $1, description = $2, data = $3, published = $4, thumbnail = $5, video_url = $6 WHERE id = $7`,
+            [name, description || '', data, published || false, thumbnail, videoUrl, id]
+        );
+        res.json({ success: true });
+    } catch (err) { res.status(500).json({ error: 'Server error' }); }
 });
 
 app.delete('/api/games/:id', async (req, res) => {
-    await pool.query('DELETE FROM games WHERE id=$1 AND author=$2', [req.params.id, req.body.author]);
-    res.json({ success: true });
+    const { id } = req.params;
+    const { author } = req.body;
+    try {
+        const result = await pool.query('DELETE FROM games WHERE id = $1 AND author = $2', [id, author]);
+        if (result.rowCount === 0) return res.status(404).json({ error: 'Game not found' });
+        res.json({ success: true });
+    } catch (err) { res.status(500).json({ error: 'Server error' }); }
 });
 
 app.post('/api/updateCoins', async (req, res) => {
-    await pool.query('UPDATE users SET coins=$1 WHERE username=$2', [req.body.coins, req.body.username]);
-    res.json({ success: true });
+    const { username, coins } = req.body;
+    try {
+        await pool.query('UPDATE users SET coins = $1 WHERE username = $2', [coins, username]);
+        res.json({ success: true });
+    } catch (err) { res.status(500).json({ error: 'Server error' }); }
 });
 
 app.post('/api/chat', async (req, res) => {
     const { username, text, time } = req.body;
-    await pool.query('INSERT INTO chat_messages (username, text, time) VALUES ($1,$2,$3)', [username, text, time]);
-    res.json({ success: true });
+    try {
+        await pool.query('INSERT INTO chat_messages (username, text, time) VALUES ($1, $2, $3)', [username, text, time]);
+        await pool.query('DELETE FROM chat_messages WHERE id NOT IN (SELECT id FROM chat_messages ORDER BY id DESC LIMIT 100)');
+        res.json({ success: true });
+    } catch (err) { res.status(500).json({ error: 'Server error' }); }
 });
 
 app.get('/api/chat', async (req, res) => {
-    const r = await pool.query('SELECT * FROM chat_messages ORDER BY id DESC LIMIT 50');
-    res.json(r.rows);
+    try {
+        const result = await pool.query('SELECT username, text, time FROM chat_messages ORDER BY id ASC LIMIT 50');
+        res.json(result.rows);
+    } catch (err) { res.status(500).json({ error: 'Server error' }); }
 });
 
 app.post('/api/reports', async (req, res) => {
     const { username, text, time } = req.body;
-    await pool.query('INSERT INTO reports (username, text, time) VALUES ($1,$2,$3)', [username, text, time]);
-    res.json({ success: true });
+    try {
+        await pool.query('INSERT INTO reports (username, text, time) VALUES ($1, $2, $3)', [username, text, time]);
+        res.json({ success: true });
+    } catch (err) { res.status(500).json({ error: 'Server error' }); }
 });
 
 app.get('/api/reports', async (req, res) => {
-    const r = await pool.query('SELECT * FROM reports ORDER BY id DESC LIMIT 50');
-    res.json(r.rows);
+    try {
+        const result = await pool.query('SELECT username, text, time FROM reports ORDER BY id DESC LIMIT 50');
+        res.json(result.rows);
+    } catch (err) { res.status(500).json({ error: 'Server error' }); }
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`API on ${PORT}`));
+app.listen(PORT, () => console.log(`API server running on port ${PORT}`));
