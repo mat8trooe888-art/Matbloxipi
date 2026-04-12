@@ -4,7 +4,7 @@ const cors = require('cors');
 require('dotenv').config();
 
 const app = express();
-app.use(cors({ origin: ['https://matblox.onrender.com', 'http://localhost:3000'], credentials: true }));
+app.use(cors());
 app.use(express.json());
 
 const pool = new Pool({
@@ -35,10 +35,6 @@ async function initDB() {
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         `);
-        await pool.query(`ALTER TABLE games ADD COLUMN IF NOT EXISTS published BOOLEAN DEFAULT FALSE`);
-        await pool.query(`ALTER TABLE games ADD COLUMN IF NOT EXISTS thumbnail TEXT`);
-        await pool.query(`ALTER TABLE games ADD COLUMN IF NOT EXISTS video_url TEXT`);
-        
         await pool.query(`
             CREATE TABLE IF NOT EXISTS chat_messages (
                 id SERIAL PRIMARY KEY,
@@ -96,39 +92,25 @@ app.post('/api/login', async (req, res) => {
 
 app.get('/api/games', async (req, res) => {
     try {
-        const publishedOnly = req.query.published === 'true';
-        let query = 'SELECT id, name, author, description, data, published, thumbnail, video_url FROM games';
-        if (publishedOnly) query += ' WHERE published = true';
-        query += ' ORDER BY created_at DESC';
-        const result = await pool.query(query);
+        const result = await pool.query('SELECT id, name, author, description, data FROM games ORDER BY created_at DESC');
         res.json(result.rows);
     } catch (err) { res.status(500).json({ error: 'Server error' }); }
 });
 
 app.post('/api/games', async (req, res) => {
-    const { name, author, description, data, published } = req.body;
+    const { name, author, description, data } = req.body;
     if (!name || !author) return res.status(400).json({ error: 'Missing fields' });
-    const thumbnail = data?.thumbnail || null;
-    const videoUrl = data?.videoUrl || null;
     try {
-        const result = await pool.query(
-            `INSERT INTO games (name, author, description, data, published, thumbnail, video_url) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
-            [name, author, description || '', data, published || false, thumbnail, videoUrl]
-        );
+        const result = await pool.query('INSERT INTO games (name, author, description, data) VALUES ($1, $2, $3, $4) RETURNING id', [name, author, description || '', data]);
         res.json({ id: result.rows[0].id });
     } catch (err) { res.status(500).json({ error: 'Server error' }); }
 });
 
 app.put('/api/games/:id', async (req, res) => {
     const { id } = req.params;
-    const { name, description, data, published } = req.body;
-    const thumbnail = data?.thumbnail || null;
-    const videoUrl = data?.videoUrl || null;
+    const { name, description, data } = req.body;
     try {
-        await pool.query(
-            `UPDATE games SET name = $1, description = $2, data = $3, published = $4, thumbnail = $5, video_url = $6 WHERE id = $7`,
-            [name, description || '', data, published || false, thumbnail, videoUrl, id]
-        );
+        await pool.query('UPDATE games SET name = $1, description = $2, data = $3 WHERE id = $4', [name, description || '', data, id]);
         res.json({ success: true });
     } catch (err) { res.status(500).json({ error: 'Server error' }); }
 });
