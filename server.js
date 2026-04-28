@@ -1,158 +1,199 @@
 const express = require('express');
 const { Pool } = require('pg');
-const cors = require('cors');
+const path = require('path');
+const fetch = require('node-fetch'); // убедись, что добавил node-fetch в package.json или используй встроенный в Node 18+
+
 require('dotenv').config();
 
 const app = express();
-app.use(cors({ origin: ['https://matblox.onrender.com', 'http://localhost:3000'], credentials: true }));
-app.use(express.json({ limit: '50mb' }));
+const PORT = process.env.PORT || 10000;
 
+// Подключение к PostgreSQL
 const pool = new Pool({
     connectionString: process.env.DATABASE_URL,
     ssl: { rejectUnauthorized: false }
 });
 
+// Middleware
+app.use(express.json());
+
+// CORS (для разработки, можно оставить)
+app.use((req, res, next) => {
+    res.header('Access-Control-Allow-Origin', '*');
+    res.header('Access-Control-Allow-Headers', 'Content-Type');
+    res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE');
+    next();
+});
+
+// Инициализация таблиц
 async function initDB() {
+    const client = await pool.connect();
     try {
-        await pool.query(`
+        await client.query(`
             CREATE TABLE IF NOT EXISTS users (
                 id SERIAL PRIMARY KEY,
                 username VARCHAR(50) UNIQUE NOT NULL,
-                password VARCHAR(255) NOT NULL,
-                coins INT DEFAULT 500,
-                inventory TEXT,
-                friends TEXT,
-                isGuest BOOLEAN DEFAULT FALSE
-            )
-        `);
-        await pool.query(`
+                password VARCHAR(100) NOT NULL,
+                coins INTEGER DEFAULT 0,
+                inventory TEXT DEFAULT '[]',
+                friends TEXT DEFAULT '[]',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
             CREATE TABLE IF NOT EXISTS games (
                 id SERIAL PRIMARY KEY,
                 name VARCHAR(100) NOT NULL,
                 author VARCHAR(50) NOT NULL,
-                description TEXT,
-                data JSONB NOT NULL,
+                description TEXT DEFAULT '',
+                data JSONB DEFAULT '{}',
+                published BOOLEAN DEFAULT false,
+                likes INTEGER DEFAULT 0,
+                visits INTEGER DEFAULT 0,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        `);
-        await pool.query(`ALTER TABLE games ADD COLUMN IF NOT EXISTS published BOOLEAN DEFAULT FALSE`);
-        await pool.query(`ALTER TABLE games ADD COLUMN IF NOT EXISTS thumbnail TEXT`);
-        await pool.query(`ALTER TABLE games ADD COLUMN IF NOT EXISTS video_url TEXT`);
-        await pool.query(`ALTER TABLE games ADD COLUMN IF NOT EXISTS likes INT DEFAULT 0`);
-        await pool.query(`ALTER TABLE games ADD COLUMN IF NOT EXISTS visits INT DEFAULT 0`);
-        
-        await pool.query(`
+            );
             CREATE TABLE IF NOT EXISTS game_likes (
-                game_id INT,
+                id SERIAL PRIMARY KEY,
+                game_id INTEGER REFERENCES games(id) ON DELETE CASCADE,
+                username VARCHAR(50) NOT NULL,
+                UNIQUE(game_id, username)
+            );
+            CREATE TABLE IF NOT EXISTS messages (
+                id SERIAL PRIMARY KEY,
+                room_id VARCHAR(100),
                 username VARCHAR(50),
-                PRIMARY KEY(game_id, username)
-            )
+                text TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
         `);
-        
-        await pool.query(`
-            CREATE TABLE IF NOT EXISTS chat_messages (
-                id SERIAL PRIMARY KEY,
-                username VARCHAR(50) NOT NULL,
-                text TEXT NOT NULL,
-                time VARCHAR(20)
-            )
-        `);
-        await pool.query(`
-            CREATE TABLE IF NOT EXISTS reports (
-                id SERIAL PRIMARY KEY,
-                username VARCHAR(50) NOT NULL,
-                text TEXT NOT NULL,
-                time VARCHAR(50)
-            )
-        `);
-        console.log('✅ База данных готова');
-    } catch (err) { console.error('❌ Ошибка инициализации БД:', err); }
+        console.log('✅ База данных инициализирована');
+    } catch (err) {
+        console.error('❌ Ошибка инициализации БД:', err);
+    } finally {
+        client.release();
+    }
 }
-initDB();
 
-app.get('/', (req, res) => { res.send('BlockVerse API running'); });
+// Проверка reCAPTCHA
+async function verifyRecaptcha(token) {
+    const secret = process.env.RECAPTCHA_SECRET || '6LenLM4sAAAAADfpByD4FChLels6okmu9hpPFn75';
+    const response = await fetch(`https://www.google.com/recaptcha/api/siteverify?secret=${secret}&response=${token}`, {
+        method: 'POST'
+    });
+    const data = await response.json();
+    return data.success;
+}
 
+// ========== ЭНДПОИНТЫ ==========
+
+// Регистрация
 app.post('/api/register', async (req, res) => {
-    const { username, password } = req.body;
-    if (!username || !password) return res.status(400).json({ error: 'Username and password required' });
+    const { username, password, recaptchaToken } = req.body;
+    if (!username || !password) {
+        return res.status(400).json({ success: false, error: 'Имя и пароль обязательны' });
+    }
+    // Проверка капчи
+    const captchaOk = await verifyRecaptcha(recaptchaToken);
+    if (!captchaOk) {
+        return res.status(400).json({ success: false, error: 'Не пройдена проверка reCAPTCHA' });
+    }
+
     try {
-        const existing = await pool.query('SELECT * FROM users WHERE username = $1', [username]);
-        if (existing.rows.length) return res.status(400).json({ error: 'User already exists' });
         await pool.query('INSERT INTO users (username, password) VALUES ($1, $2)', [username, password]);
         res.json({ success: true });
-    } catch (err) { res.status(500).json({ error: 'Server error' }); }
+    } catch (err) {
+        if (err.code === '23505') {
+            res.status(400).json({ success: false, error: 'Пользователь уже существует' });
+        } else {
+            console.error(err);
+            res.status(500).json({ success: false, error: 'Внутренняя ошибка сервера' });
+        }
+    }
 });
 
+// Вход
 app.post('/api/login', async (req, res) => {
     const { username, password } = req.body;
     try {
         const result = await pool.query('SELECT * FROM users WHERE username = $1 AND password = $2', [username, password]);
-        if (result.rows.length) {
+        if (result.rows.length > 0) {
             const user = result.rows[0];
             res.json({
                 success: true,
                 user: {
                     username: user.username,
                     coins: user.coins,
-                    inventory: user.inventory ? JSON.parse(user.inventory) : [],
-                    friends: user.friends ? JSON.parse(user.friends) : []
+                    inventory: JSON.parse(user.inventory || '[]'),
+                    friends: JSON.parse(user.friends || '[]')
                 }
             });
         } else {
-            res.status(401).json({ error: 'Invalid credentials' });
+            res.status(401).json({ success: false, error: 'Неверное имя пользователя или пароль' });
         }
-    } catch (err) { res.status(500).json({ error: 'Server error' }); }
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ success: false, error: 'Ошибка сервера' });
+    }
 });
 
+// Получить игры
 app.get('/api/games', async (req, res) => {
+    const { published } = req.query;
     try {
-        const publishedOnly = req.query.published === 'true';
-        let query = 'SELECT id, name, author, description, data, published, thumbnail, video_url, likes, visits FROM games';
-        if (publishedOnly) query += ' WHERE published = true';
-        query += ' ORDER BY created_at DESC';
+        let query = 'SELECT id, name, author, description, data, published, likes, visits FROM games';
+        if (published === 'true') query += ' WHERE published = true';
+        query += ' ORDER BY created_at DESC LIMIT 50';
         const result = await pool.query(query);
         res.json(result.rows);
-    } catch (err) { res.status(500).json({ error: 'Server error' }); }
+    } catch (err) {
+        console.error(err);
+        res.status(500).json([]);
+    }
 });
 
+// Сохранить новую игру
 app.post('/api/games', async (req, res) => {
     const { name, author, description, data, published } = req.body;
-    if (!name || !author) return res.status(400).json({ error: 'Missing fields' });
-    const thumbnail = data?.thumbnail || null;
-    const videoUrl = data?.videoUrl || null;
     try {
         const result = await pool.query(
-            `INSERT INTO games (name, author, description, data, published, thumbnail, video_url) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
-            [name, author, description || '', data, published || false, thumbnail, videoUrl]
+            'INSERT INTO games (name, author, description, data, published) VALUES ($1, $2, $3, $4, $5) RETURNING id',
+            [name, author, description || '', data || {}, published || false]
         );
-        res.json({ id: result.rows[0].id });
-    } catch (err) { res.status(500).json({ error: 'Server error' }); }
+        res.json({ success: true, id: result.rows[0].id });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ success: false, error: 'Не удалось сохранить игру' });
+    }
 });
 
+// Обновить игру
 app.put('/api/games/:id', async (req, res) => {
     const { id } = req.params;
     const { name, description, data, published } = req.body;
-    const thumbnail = data?.thumbnail || null;
-    const videoUrl = data?.videoUrl || null;
     try {
         await pool.query(
-            `UPDATE games SET name = $1, description = $2, data = $3, published = $4, thumbnail = $5, video_url = $6 WHERE id = $7`,
-            [name, description || '', data, published || false, thumbnail, videoUrl, id]
+            'UPDATE games SET name = $1, description = $2, data = $3, published = $4 WHERE id = $5',
+            [name, description, data, published, id]
         );
         res.json({ success: true });
-    } catch (err) { res.status(500).json({ error: 'Server error' }); }
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ success: false, error: 'Не удалось обновить игру' });
+    }
 });
 
+// Удалить игру
 app.delete('/api/games/:id', async (req, res) => {
     const { id } = req.params;
     const { author } = req.body;
     try {
-        const result = await pool.query('DELETE FROM games WHERE id = $1 AND author = $2', [id, author]);
-        if (result.rowCount === 0) return res.status(404).json({ error: 'Game not found' });
+        await pool.query('DELETE FROM games WHERE id = $1 AND author = $2', [id, author]);
         res.json({ success: true });
-    } catch (err) { res.status(500).json({ error: 'Server error' }); }
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ success: false });
+    }
 });
 
+// Лайкнуть/анлайкнуть игру
 app.post('/api/games/:id/like', async (req, res) => {
     const { id } = req.params;
     const { username } = req.body;
@@ -167,69 +208,44 @@ app.post('/api/games/:id/like', async (req, res) => {
             await pool.query('UPDATE games SET likes = likes + 1 WHERE id = $1', [id]);
             res.json({ liked: true });
         }
-    } catch (err) { res.status(500).json({ error: 'Server error' }); }
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ success: false });
+    }
 });
 
+// Увеличить счётчик посещений
 app.post('/api/games/:id/visit', async (req, res) => {
     const { id } = req.params;
     try {
         await pool.query('UPDATE games SET visits = visits + 1 WHERE id = $1', [id]);
         res.json({ success: true });
-    } catch (err) { res.status(500).json({ error: 'Server error' }); }
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ success: false });
+    }
 });
 
+// Статистика пользователя
 app.get('/api/users/:username/stats', async (req, res) => {
     const { username } = req.params;
     try {
         const gamesCount = await pool.query('SELECT COUNT(*) FROM games WHERE author = $1', [username]);
-        const likesSum = await pool.query('SELECT COALESCE(SUM(likes),0) FROM games WHERE author = $1', [username]);
-        const visitsSum = await pool.query('SELECT COALESCE(SUM(visits),0) FROM games WHERE author = $1', [username]);
+        const likesSum = await pool.query('SELECT SUM(likes) FROM games WHERE author = $1', [username]);
+        const visitsSum = await pool.query('SELECT SUM(visits) FROM games WHERE author = $1', [username]);
         res.json({
             games: parseInt(gamesCount.rows[0].count),
-            likes: parseInt(likesSum.rows[0].coalesce),
-            visits: parseInt(visitsSum.rows[0].coalesce)
+            likes: parseInt(likesSum.rows[0].sum || 0),
+            visits: parseInt(visitsSum.rows[0].sum || 0)
         });
-    } catch (err) { res.status(500).json({ error: 'Server error' }); }
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ games: 0, likes: 0, visits: 0 });
+    }
 });
 
-app.post('/api/updateCoins', async (req, res) => {
-    const { username, coins } = req.body;
-    try {
-        await pool.query('UPDATE users SET coins = $1 WHERE username = $2', [coins, username]);
-        res.json({ success: true });
-    } catch (err) { res.status(500).json({ error: 'Server error' }); }
+// Запуск
+app.listen(PORT, async () => {
+    console.log(`🚀 API сервер запущен на порту ${PORT}`);
+    await initDB();
 });
-
-app.post('/api/chat', async (req, res) => {
-    const { username, text, time } = req.body;
-    try {
-        await pool.query('INSERT INTO chat_messages (username, text, time) VALUES ($1, $2, $3)', [username, text, time]);
-        await pool.query('DELETE FROM chat_messages WHERE id NOT IN (SELECT id FROM chat_messages ORDER BY id DESC LIMIT 100)');
-        res.json({ success: true });
-    } catch (err) { res.status(500).json({ error: 'Server error' }); }
-});
-
-app.get('/api/chat', async (req, res) => {
-    try {
-        const result = await pool.query('SELECT username, text, time FROM chat_messages ORDER BY id ASC LIMIT 50');
-        res.json(result.rows);
-    } catch (err) { res.status(500).json({ error: 'Server error' }); }
-});
-
-app.post('/api/reports', async (req, res) => {
-    const { username, text, time } = req.body;
-    try {
-        await pool.query('INSERT INTO reports (username, text, time) VALUES ($1, $2, $3)', [username, text, time]);
-        res.json({ success: true });
-    } catch (err) { res.status(500).json({ error: 'Server error' }); }
-});
-
-app.get('/api/reports', async (req, res) => {
-    try {
-        const result = await pool.query('SELECT username, text, time FROM reports ORDER BY id DESC LIMIT 50');
-        res.json(result.rows);
-    } catch (err) { res.status(500).json({ error: 'Server error' }); }
-});
-
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`🚀 API сервер запущен на порту ${PORT}`));
