@@ -1,8 +1,6 @@
 const express = require('express');
 const { Pool } = require('pg');
 const path = require('path');
-const fetch = require('node-fetch'); // убедись, что добавил node-fetch в package.json или используй встроенный в Node 18+
-
 require('dotenv').config();
 
 const app = express();
@@ -17,7 +15,7 @@ const pool = new Pool({
 // Middleware
 app.use(express.json());
 
-// CORS (для разработки, можно оставить)
+// CORS
 app.use((req, res, next) => {
     res.header('Access-Control-Allow-Origin', '*');
     res.header('Access-Control-Allow-Headers', 'Content-Type');
@@ -64,7 +62,7 @@ async function initDB() {
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
         `);
-        console.log('✅ База данных инициализирована');
+        console.log('✅ База данных готова');
     } catch (err) {
         console.error('❌ Ошибка инициализации БД:', err);
     } finally {
@@ -72,7 +70,7 @@ async function initDB() {
     }
 }
 
-// Проверка reCAPTCHA
+// Проверка reCAPTCHA (используем встроенный fetch)
 async function verifyRecaptcha(token) {
     const secret = process.env.RECAPTCHA_SECRET || '6LenLM4sAAAAADfpByD4FChLels6okmu9hpPFn75';
     const response = await fetch(`https://www.google.com/recaptcha/api/siteverify?secret=${secret}&response=${token}`, {
@@ -84,13 +82,11 @@ async function verifyRecaptcha(token) {
 
 // ========== ЭНДПОИНТЫ ==========
 
-// Регистрация
 app.post('/api/register', async (req, res) => {
     const { username, password, recaptchaToken } = req.body;
     if (!username || !password) {
         return res.status(400).json({ success: false, error: 'Имя и пароль обязательны' });
     }
-    // Проверка капчи
     const captchaOk = await verifyRecaptcha(recaptchaToken);
     if (!captchaOk) {
         return res.status(400).json({ success: false, error: 'Не пройдена проверка reCAPTCHA' });
@@ -109,7 +105,6 @@ app.post('/api/register', async (req, res) => {
     }
 });
 
-// Вход
 app.post('/api/login', async (req, res) => {
     const { username, password } = req.body;
     try {
@@ -134,7 +129,6 @@ app.post('/api/login', async (req, res) => {
     }
 });
 
-// Получить игры
 app.get('/api/games', async (req, res) => {
     const { published } = req.query;
     try {
@@ -149,7 +143,6 @@ app.get('/api/games', async (req, res) => {
     }
 });
 
-// Сохранить новую игру
 app.post('/api/games', async (req, res) => {
     const { name, author, description, data, published } = req.body;
     try {
@@ -164,7 +157,6 @@ app.post('/api/games', async (req, res) => {
     }
 });
 
-// Обновить игру
 app.put('/api/games/:id', async (req, res) => {
     const { id } = req.params;
     const { name, description, data, published } = req.body;
@@ -180,7 +172,6 @@ app.put('/api/games/:id', async (req, res) => {
     }
 });
 
-// Удалить игру
 app.delete('/api/games/:id', async (req, res) => {
     const { id } = req.params;
     const { author } = req.body;
@@ -193,7 +184,6 @@ app.delete('/api/games/:id', async (req, res) => {
     }
 });
 
-// Лайкнуть/анлайкнуть игру
 app.post('/api/games/:id/like', async (req, res) => {
     const { id } = req.params;
     const { username } = req.body;
@@ -214,7 +204,6 @@ app.post('/api/games/:id/like', async (req, res) => {
     }
 });
 
-// Увеличить счётчик посещений
 app.post('/api/games/:id/visit', async (req, res) => {
     const { id } = req.params;
     try {
@@ -226,7 +215,6 @@ app.post('/api/games/:id/visit', async (req, res) => {
     }
 });
 
-// Статистика пользователя
 app.get('/api/users/:username/stats', async (req, res) => {
     const { username } = req.params;
     try {
