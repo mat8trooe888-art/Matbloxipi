@@ -1,21 +1,17 @@
 const express = require('express');
 const { Pool } = require('pg');
-const path = require('path');
 require('dotenv').config();
 
 const app = express();
 const PORT = process.env.PORT || 10000;
 
-// Подключение к PostgreSQL
 const pool = new Pool({
     connectionString: process.env.DATABASE_URL,
     ssl: { rejectUnauthorized: false }
 });
 
-// Middleware
 app.use(express.json());
 
-// CORS
 app.use((req, res, next) => {
     res.header('Access-Control-Allow-Origin', '*');
     res.header('Access-Control-Allow-Headers', 'Content-Type');
@@ -23,7 +19,6 @@ app.use((req, res, next) => {
     next();
 });
 
-// Инициализация таблиц
 async function initDB() {
     const client = await pool.connect();
     try {
@@ -70,7 +65,6 @@ async function initDB() {
     }
 }
 
-// Проверка reCAPTCHA (используем встроенный fetch)
 async function verifyRecaptcha(token) {
     const secret = process.env.RECAPTCHA_SECRET || '6LenLM4sAAAAADfpByD4FChLels6okmu9hpPFn75';
     const response = await fetch(`https://www.google.com/recaptcha/api/siteverify?secret=${secret}&response=${token}`, {
@@ -79,8 +73,6 @@ async function verifyRecaptcha(token) {
     const data = await response.json();
     return data.success;
 }
-
-// ========== ЭНДПОИНТЫ ==========
 
 app.post('/api/register', async (req, res) => {
     const { username, password, recaptchaToken } = req.body;
@@ -93,7 +85,10 @@ app.post('/api/register', async (req, res) => {
     }
 
     try {
-        await pool.query('INSERT INTO users (username, password) VALUES ($1, $2)', [username, password]);
+        await pool.query(
+            'INSERT INTO users (username, password, coins) VALUES ($1, $2, $3)',
+            [username, password, 100]
+        );
         res.json({ success: true });
     } catch (err) {
         if (err.code === '23505') {
@@ -232,7 +227,6 @@ app.get('/api/users/:username/stats', async (req, res) => {
     }
 });
 
-// Запуск
 app.listen(PORT, async () => {
     console.log(`🚀 API сервер запущен на порту ${PORT}`);
     await initDB();
